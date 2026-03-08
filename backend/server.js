@@ -16,13 +16,24 @@ const users = new Map();
 // userId -> pushToken (persistent for background calls)
 const tokens = new Map();
 
-async function sendPushNotification(expoPushToken, payload) {
+function inferTokenType(token) {
+  if (
+    token.startsWith("ExponentPushToken") ||
+    token.startsWith("ExpoPushToken")
+  ) {
+    return "expo";
+  }
+  return "fcm";
+}
+
+async function sendExpoPushNotification(expoPushToken, payload) {
+  const fromName = payload.fromName || payload.from || "Unknown";
   const message = {
     to: expoPushToken,
     sound: "default",
-    title: `Incoming call from ${payload.fromName}`,
+    title: `Incoming call from ${fromName}`,
     body: "Tap to answer",
-    data: { ...payload, type: "incoming_call" },
+    data: { ...payload, type: "call-offer", fromName },
     priority: "high",
     channelId: "default",
   };
@@ -45,6 +56,40 @@ async function sendPushNotification(expoPushToken, payload) {
   }
 }
 
+async function sendFcmPushNotification(fcmToken, payload) {
+  const serverKey = process.env.FCM_SERVER_KEY;
+  if (!serverKey) {
+    console.log("[Push] Missing FCM_SERVER_KEY. Cannot send FCM push.");
+    return;
+  }
+
+  const fromName = payload.fromName || payload.from || "Unknown";
+  const message = {
+    to: fcmToken,
+    priority: "high",
+    data: { ...payload, type: "call-offer", fromName },
+    android: {
+      priority: "high",
+    },
+  };
+
+  try {
+    const response = await fetch("https://fcm.googleapis.com/fcm/send", {
+      method: "POST",
+      headers: {
+        Authorization: `key=${serverKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(message),
+    });
+    console.log(
+      `[Push] FCM sent to ${payload.targetId}, Status: ${response.status}`,
+    );
+  } catch (err) {
+    console.error(`[Push] FCM Failed:`, err);
+  }
+}
+
 io.on("connection", (socket) => {
   console.log("⚡ A device connected:", socket.id);
 
@@ -58,8 +103,9 @@ io.on("connection", (socket) => {
 
   socket.on("register_push", (data) => {
     if (data.userId && data.token) {
-      tokens.set(data.userId, data.token);
-      console.log(`📲 Push token stored for: ${data.userId}`);
+      const type = data.type || inferTokenType(data.token);
+      tokens.set(data.userId, { token: data.token, type });
+      console.log(`📲 Push token stored for: ${data.userId} (${type})`);
     }
   });
 
@@ -73,10 +119,14 @@ io.on("connection", (socket) => {
       );
     } else if (payload.type === "call-offer") {
       // User is offline, try pushing
-      const token = tokens.get(payload.targetId);
-      if (token) {
+      const tokenInfo = tokens.get(payload.targetId);
+      if (tokenInfo) {
         console.log(`💤 ${payload.targetId} is offline. Sending Push...`);
-        sendPushNotification(token, payload);
+        if (tokenInfo.type === "expo") {
+          sendExpoPushNotification(tokenInfo.token, payload);
+        } else {
+          sendFcmPushNotification(tokenInfo.token, payload);
+        }
       } else {
         console.log(
           `❌ Signal failed: ${payload.targetId} is offline and has no push token`,

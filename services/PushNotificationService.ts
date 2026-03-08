@@ -1,4 +1,5 @@
 import { UIEvents } from "@/utils/UIEvents";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   getMessaging,
   getToken,
@@ -9,6 +10,7 @@ import * as Device from "expo-device";
 import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
 import { CallKeepService } from "./CallKeepService";
+import { CallService } from "./CallService";
 import { GlobalSigClient } from "./GlobalSigClient";
 
 /**
@@ -28,11 +30,45 @@ class PushNotificationServiceClass {
           remoteMessage.data,
         );
         const data = remoteMessage.data;
+
+        // Added check to ignore signals from self
+        const myId = await AsyncStorage.getItem("@user_id");
+        if (myId && data && data.fromId === myId) {
+          console.log(`[Push] 🤫 Ignoring reflected ${data.type} from self`);
+          return;
+        }
+
         if (data && data.type === "call-offer") {
+          // BUSY CHECK: If we are already in a call, ignore push offers
+          const isBusy = await AsyncStorage.getItem("@is_calling_active");
+          if (isBusy === "true") {
+            console.log(
+              "[Push] 📵 App is BUSY (active call). Ignoring background call-offer.",
+            );
+            return;
+          }
+
           console.log(
             "[Push] 📞 Triggering CallKeep for background call from:",
             data.from,
           );
+
+          // Acknowledge receipt even if app is closed/backgrounded
+          try {
+            const myName = await AsyncStorage.getItem("@user_name");
+            if (myId && myName) {
+              console.log("[Push] 🔔 Sending 'ringing' ack back to caller...");
+              CallService.sendSignal(data.fromId as string, {
+                type: "call-ringing",
+                callId: data.callId as string,
+                from: myName,
+                fromId: myId,
+              });
+            }
+          } catch (e) {
+            console.warn("[Push] Failed to send ringing ack:", e);
+          }
+
           Notifications.scheduleNotificationAsync({
             content: {
               title: `Incoming ${data.callType || "video"} Call`,
@@ -78,12 +114,22 @@ class PushNotificationServiceClass {
     }
 
     try {
-      const token = (await Notifications.getExpoPushTokenAsync()).data;
-      console.log("[Push] Expo Push Token:", token);
+      let finalToken = (await Notifications.getExpoPushTokenAsync()).data;
+      console.log("[Push] Expo Push Token:", finalToken);
 
       if (Platform.OS === "android") {
-        const fcmToken = await getToken(getMessaging());
-        console.log("[Push] Native FCM Token:", fcmToken);
+        try {
+          const fcmToken = await getToken(getMessaging());
+          if (fcmToken) {
+            console.log("[Push] Native FCM Token:", fcmToken);
+            finalToken = fcmToken; // Use native FCM for Android background reliability
+          }
+        } catch (fcmError) {
+          console.warn(
+            "[Push] FCM Token fetch failed, falling back to Expo:",
+            fcmError,
+          );
+        }
 
         Notifications.setNotificationChannelAsync("default", {
           name: "default",
@@ -93,7 +139,7 @@ class PushNotificationServiceClass {
         });
       }
 
-      GlobalSigClient.registerPushToken(userId, token);
+      GlobalSigClient.registerPushToken(userId, finalToken);
     } catch (e) {
       console.log("[Push] Error getting tokens:", e);
     }

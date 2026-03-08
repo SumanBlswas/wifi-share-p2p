@@ -16,6 +16,7 @@ export const CALL_PORT = 55000;
 export type SignalType =
   | "call-offer"
   | "call-answer"
+  | "call-ringing"
   | "ice-candidate"
   | "call-end"
   | "call-reject"

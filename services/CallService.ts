@@ -4,6 +4,7 @@
  */
 
 import { EventEmitter } from "@/utils/EventEmitter";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { RTCPeerConnection } from "react-native-webrtc";
 import { CallKeepService } from "./CallKeepService";
 import { GlobalSigClient } from "./GlobalSigClient";
@@ -16,13 +17,39 @@ class CallServiceClass {
   private peers: { [peerId: string]: RTCPeerConnection } = {};
   private onIncomingCall: ((signal: CallSignal) => void) | null = null;
   private onCallEnded: ((callId?: string) => void) | null = null;
+  private onCallRinging: ((callId?: string) => void) | null = null;
   private routerPush: ((path: any) => void) | null = null;
   private isInitialized = false;
   private identity: { name: string; phone: string } | null = null;
   private activeCallId: string | null = null;
+  private isCallActive = false;
+  private recentOutgoingCalls: Map<string, number> = new Map();
 
-  setActiveCall(callId: string | null) {
+  async setCallActive(active: boolean) {
+    this.isCallActive = active;
+    if (!active) this.activeCallId = null;
+    try {
+      await AsyncStorage.setItem(
+        "@is_calling_active",
+        active ? "true" : "false",
+      );
+    } catch (e) {}
+  }
+
+  async setActiveCall(callId: string | null) {
     this.activeCallId = callId;
+    this.isCallActive = !!callId;
+    try {
+      await AsyncStorage.setItem(
+        "@is_calling_active",
+        !!callId ? "true" : "false",
+      );
+    } catch (e) {}
+  }
+
+  // Record that we just sent a call to a specific peer to prevent loops
+  recordOutgoingCall(peerId: string) {
+    this.recentOutgoingCalls.set(peerId, Date.now());
   }
 
   init(routerPush: (path: any) => void, userId?: string, userName?: string) {
@@ -51,7 +78,42 @@ class CallServiceClass {
     console.log("[CallService] ✅ Hybrid Signaling Initialized (TCP + Render)");
   }
 
-  private handleSignal(signal: CallSignal) {
+  private async handleSignal(signal: CallSignal) {
+    // 1. DYNAMIC IDENTITY CHECK: Ensure we know who we are to filter reflected signals
+    let myId: string | null = this.identity?.phone || null;
+    if (!myId) {
+      myId = await AsyncStorage.getItem("@user_id");
+    }
+
+    // 2. IGNORE signals from ourself (prevents "calling yourself" loop)
+    if (myId && signal.fromId === myId) {
+      console.log(
+        `[CallService] 🤫 Ignoring reflected ${signal.type} from self`,
+      );
+      return;
+    }
+
+    // 3. BUSY PROTECTION: If we are already in a call, ignore new offers
+    if (signal.type === "call-offer" && this.isCallActive) {
+      console.log(
+        `[CallService] 📵 Busy: Ignoring incoming call-offer from ${signal.from} because a call is already active.`,
+      );
+      return;
+    }
+
+    // 4. CALL GLARE PROTECTION (CRITICAL FIX)
+    // If we just sent an offer to this person in the last 10 seconds,
+    // ignore any incoming offer from them to prevent the "double ring" loop.
+    if (signal.type === "call-offer") {
+      const lastSent = this.recentOutgoingCalls.get(signal.fromId!);
+      if (lastSent && Date.now() - lastSent < 10000) {
+        console.log(
+          `[CallService] 🚫 Shielding Srot: Glare detected. Ignoring incoming call from ${signal.from} because we are already calling them.`,
+        );
+        return;
+      }
+    }
+
     console.log(
       "[CallService] 📥 Signal Received via",
       signal.fromIp ? "TCP" : "Global",
@@ -87,6 +149,16 @@ class CallServiceClass {
           signal,
         );
 
+        // ACKNOWLEDGE: Send 'ringing' back to caller immediately
+        if (this.identity) {
+          this.sendSignal(signal.fromId!, {
+            type: "call-ringing",
+            callId: signal.callId!,
+            from: this.identity.name,
+            fromId: this.identity.phone,
+          });
+        }
+
         if (this.routerPush) {
           this.routerPush({
             pathname: "/call",
@@ -105,6 +177,10 @@ class CallServiceClass {
       case "call-end":
       case "call-reject":
         if (this.onCallEnded) this.onCallEnded(signal.callId);
+        break;
+
+      case "call-ringing":
+        if (this.onCallRinging) this.onCallRinging(signal.callId);
         break;
 
       case "identity-request":
@@ -151,6 +227,10 @@ class CallServiceClass {
 
   setCallEndedHandler(handler: (callId?: string) => void) {
     this.onCallEnded = handler;
+  }
+
+  setCallRingingHandler(handler: (callId?: string) => void) {
+    this.onCallRinging = handler;
   }
 
   async sendSignal(targetId: string, signal: CallSignal, peerIp?: string) {

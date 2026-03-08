@@ -1,4 +1,5 @@
 import { useAuth } from '@/contexts/AuthContext';
+import { useDatabase } from '@/contexts/DatabaseContext';
 import { CallKeepService } from '@/services/CallKeepService';
 import { CallService } from '@/services/CallService';
 import { GlobalSigClient } from '@/services/GlobalSigClient';
@@ -29,6 +30,7 @@ export default function CallScreen() {
     }>();
 
     const { userId, name } = useAuth();
+    const { db } = useDatabase();
     const router = useRouter();
 
     const [callState, setCallState] = useState<CallState>(direction === 'incoming' ? 'ringing' : 'calling');
@@ -109,6 +111,16 @@ export default function CallScreen() {
         }
         setRemoteStream(null);
         CallKeepService.endCall(callId);
+        CallService.setCallActive(false);
+        CallService.setActiveCall(null);
+
+        // Update call status in DB if call ended before connecting
+        if (db && callState !== 'connected' && callState !== 'ended') {
+            db.runAsync(
+                'UPDATE call_history SET status = ? WHERE id = ?',
+                ['missed', callId]
+            ).catch(e => console.warn('[DB] Failed to update call status:', e));
+        }
     };
 
     useEffect(() => {
@@ -120,6 +132,8 @@ export default function CallScreen() {
         InCallManager.setKeepScreenOn(true);
 
         setupWebRTC();
+        CallService.setCallActive(true);
+        CallService.setActiveCall(callId);
 
         // 30 SEC TIMEOUT FOR OUTGOING CALLS
         if (direction === 'outgoing') {
@@ -232,9 +246,23 @@ export default function CallScreen() {
         const onSystemEnd = () => {
             handleHangUp();
         };
+        const onCallRinging = () => {
+            console.log('[CallService] 🔔 Peer is ringing!');
+            setCallState('ringing');
+            if (callTimeoutRef.current) {
+                clearTimeout(callTimeoutRef.current);
+                // Restart timeout with longer duration once it starts ringing
+                callTimeoutRef.current = setTimeout(() => {
+                    if (callState === 'ringing') {
+                        handleHangUp();
+                    }
+                }, 45000);
+            }
+        };
 
         UIEvents.on('CALLKEEP_ANSWER', onSystemAnswer);
         UIEvents.on('CALLKEEP_END', onSystemEnd);
+        CallService.setCallRingingHandler(onCallRinging);
 
         // Listen for Native Audio Route Changes
         const onAudioRouteChange = () => refreshAudioRoutes();
@@ -246,8 +274,22 @@ export default function CallScreen() {
         // Tell System we are showing the screen
         if (direction === 'incoming') {
             CallKeepService.displayIncomingCall(callId, peerId, peerName);
+            // Log incoming start
+            if (db) {
+                db.runAsync(
+                    'INSERT OR REPLACE INTO call_history (id, peerId, peerName, timestamp, type, direction, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    [callId, peerId, peerName, Date.now(), callType, 'incoming', 'ringing']
+                ).catch(e => console.warn('[DB] Failed to log call history:', e));
+            }
         } else {
             CallKeepService.startCall(callId, peerId, peerName);
+            // Log outgoing start
+            if (db) {
+                db.runAsync(
+                    'INSERT OR REPLACE INTO call_history (id, peerId, peerName, timestamp, type, direction, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                    [callId, peerId, peerName, Date.now(), callType, 'outgoing', 'calling']
+                ).catch(e => console.warn('[DB] Failed to log call history:', e));
+            }
         }
 
         // Initialize Audio Routes after a short delay to let CallKeep start the session
@@ -276,6 +318,7 @@ export default function CallScreen() {
             RNCallKeep.removeEventListener('didChangeAudioRoute');
             UIEvents.off('CALLKEEP_ANSWER', onSystemAnswer);
             UIEvents.off('CALLKEEP_END', onSystemEnd);
+            CallService.setCallRingingHandler(() => { });
             GlobalSigClient.off('signal', handleSignal);
             SigServer.off('signal', handleSignal);
             CallService.setActiveCall(null);
@@ -341,6 +384,14 @@ export default function CallScreen() {
             if (pc.connectionState === 'connected') {
                 console.log(`[WebRTC] 🎉 Connection established with ${peerId}`);
                 setCallState('connected');
+
+                // Log to history
+                if (db) {
+                    db.runAsync(
+                        'UPDATE call_history SET status = ? WHERE id = ?',
+                        ['connected', callId]
+                    ).catch(e => console.warn('[DB] Failed to update call status:', e));
+                }
 
                 // Reinforce session in background
                 InCallManager.start({ media: callType === 'video' ? 'video' : 'audio' });
@@ -431,6 +482,17 @@ export default function CallScreen() {
                     sdp: offer.sdp,
                     callType: callType as any
                 });
+
+                // RECORD this outgoing attempt to prevent loops (glare protection)
+                CallService.recordOutgoingCall(peerId);
+
+                // Log to history
+                if (db) {
+                    db.runAsync(
+                        'INSERT OR REPLACE INTO call_history (id, peerId, peerName, timestamp, type, direction, status) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                        [callId, peerId, peerName, Date.now(), callType, 'outgoing', 'calling']
+                    ).catch(e => console.warn('[DB] Failed to log call history:', e));
+                }
             } catch (err) {
                 console.error('[WebRTC] Error creating offer:', err);
             }
@@ -764,7 +826,13 @@ export default function CallScreen() {
                         ((remoteStream && !isLocalFullScreen) || (localStream && isLocalFullScreen)) && callState === 'connected' && upgradeStatus !== 'receiving' && styles.stateRowOverlay
                     ]}>
                         {callState === 'calling' && <Text style={styles.stateText}>{callType === 'audio' ? 'Calling Audio…' : 'Calling Video…'}</Text>}
-                        {callState === 'ringing' && <Text style={styles.stateText}>{callType === 'audio' ? 'Incoming Audio Call' : 'Incoming Video Call'}</Text>}
+                        {callState === 'ringing' && (
+                            <Text style={styles.stateText}>
+                                {direction === 'incoming'
+                                    ? (callType === 'audio' ? 'Incoming Audio…' : 'Incoming Video…')
+                                    : 'Ringing…'}
+                            </Text>
+                        )}
                         {upgradeStatus === 'receiving' && <Text style={styles.stateText}>Incoming Video Call</Text>}
                         {(callState === 'connected' && upgradeStatus !== 'receiving') && (
                             <>
