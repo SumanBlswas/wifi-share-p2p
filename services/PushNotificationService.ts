@@ -38,7 +38,10 @@ class PushNotificationServiceClass {
           return;
         }
 
-        if (data && data.type === "call-offer") {
+        if (
+          data &&
+          (data.type === "call-offer" || data.type === "incoming_call")
+        ) {
           // BUSY CHECK: If we are already in a call, ignore push offers
           const isBusy = await AsyncStorage.getItem("@is_calling_active");
           if (isBusy === "true") {
@@ -48,19 +51,36 @@ class PushNotificationServiceClass {
             return;
           }
 
+          const callId = (data.callId as string) || `call-${Date.now()}`;
+          const fromId =
+            (data.fromId as string) || (data.handle as string) || "unknown";
+          const fromName =
+            (data.from as string) ||
+            (data.fromName as string) ||
+            "Incoming Call";
+          const callType = (data.callType as string) || "video";
+          const normalizedPayload = {
+            ...data,
+            type: "call-offer",
+            callId,
+            fromId,
+            from: fromName,
+            fromName,
+          };
+
           console.log(
             "[Push] 📞 Triggering CallKeep for background call from:",
-            data.from,
+            fromName,
           );
 
           // Acknowledge receipt even if app is closed/backgrounded
           try {
             const myName = await AsyncStorage.getItem("@user_name");
-            if (myId && myName) {
+            if (myId && myName && fromId !== "unknown") {
               console.log("[Push] 🔔 Sending 'ringing' ack back to caller...");
-              CallService.sendSignal(data.fromId as string, {
+              CallService.sendSignal(fromId, {
                 type: "call-ringing",
-                callId: data.callId as string,
+                callId,
                 from: myName,
                 fromId: myId,
               });
@@ -69,11 +89,13 @@ class PushNotificationServiceClass {
             console.warn("[Push] Failed to send ringing ack:", e);
           }
 
+          await CallKeepService.setup({ requestPermissions: false });
+
           Notifications.scheduleNotificationAsync({
             content: {
-              title: `Incoming ${data.callType || "video"} Call`,
-              body: `${data.from || "Someone"} is calling you...`,
-              data: data as any,
+              title: `Incoming ${callType} Call`,
+              body: `${fromName} is calling you...`,
+              data: normalizedPayload as any,
               sound: true,
               priority: Notifications.AndroidNotificationPriority.MAX,
               categoryIdentifier: "incoming-call",
@@ -81,10 +103,10 @@ class PushNotificationServiceClass {
             trigger: null,
           });
           CallKeepService.displayIncomingCall(
-            (data.callId as string) || `call-${Date.now()}`,
-            (data.fromId as string) || "unknown",
-            (data.from as string) || "Incoming Call",
-            data,
+            callId,
+            fromId,
+            fromName,
+            normalizedPayload,
           );
         }
       });
@@ -115,6 +137,7 @@ class PushNotificationServiceClass {
 
     try {
       let finalToken = (await Notifications.getExpoPushTokenAsync()).data;
+      let tokenType: "expo" | "fcm" = "expo";
       console.log("[Push] Expo Push Token:", finalToken);
 
       if (Platform.OS === "android") {
@@ -122,7 +145,8 @@ class PushNotificationServiceClass {
           const fcmToken = await getToken(getMessaging());
           if (fcmToken) {
             console.log("[Push] Native FCM Token:", fcmToken);
-            finalToken = fcmToken; // Use native FCM for Android background reliability
+            finalToken = fcmToken;
+            tokenType = "fcm";
           }
         } catch (fcmError) {
           console.warn(
@@ -137,9 +161,15 @@ class PushNotificationServiceClass {
           vibrationPattern: [0, 250, 250, 250],
           lightColor: "#FF231F7C",
         });
+        Notifications.setNotificationChannelAsync("incoming-call", {
+          name: "Incoming Calls",
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: "#FF231F7C",
+        });
       }
 
-      GlobalSigClient.registerPushToken(userId, finalToken);
+      GlobalSigClient.registerPushToken(userId, finalToken, tokenType);
     } catch (e) {
       console.log("[Push] Error getting tokens:", e);
     }

@@ -11,10 +11,12 @@ class CallKeepServiceClass {
   private isInitialized = false;
   private pendingCallMetadata: { [uuid: string]: any } = {};
 
-  async setup() {
+  async setup(setupOptions?: { requestPermissions?: boolean }) {
     if (this.isInitialized) return;
 
-    if (Platform.OS === "android") {
+    const requestPermissions = setupOptions?.requestPermissions !== false;
+
+    if (Platform.OS === "android" && requestPermissions) {
       try {
         const permissions = [
           PermissionsAndroid.PERMISSIONS.RECORD_AUDIO,
@@ -37,7 +39,7 @@ class CallKeepServiceClass {
       }
     }
 
-    const options = {
+    const callKeepOptions = {
       ios: {
         appName: "Srot",
       },
@@ -61,7 +63,7 @@ class CallKeepServiceClass {
     };
 
     try {
-      const accepted = await RNCallKeep.setup(options);
+      const accepted = await RNCallKeep.setup(callKeepOptions);
       console.log("[CallKeep] Setup finished, accepted:", accepted);
 
       if (Platform.OS === "android") {

@@ -7,6 +7,7 @@ const GLOBAL_SIGNAL_URL = "https://call-me-now.onrender.com";
 class GlobalSigClientClass extends EventEmitter {
   private socket: Socket | null = null;
   private pushToken: string | null = null;
+  private pushTokenType: "expo" | "fcm" | null = null;
   private userId: string | null = null;
   private connected = false;
   private knownPeers: Map<string, { name: string; phone: string }> = new Map();
@@ -34,7 +35,11 @@ class GlobalSigClientClass extends EventEmitter {
 
       // Auto-register push token if we have one
       if (this.pushToken) {
-        this.socket?.emit("register_push", { userId, token: this.pushToken });
+        this.socket?.emit("register_push", {
+          userId,
+          token: this.pushToken,
+          type: this.pushTokenType || undefined,
+        });
       }
 
       this.emit("online", true);
@@ -141,10 +146,11 @@ class GlobalSigClientClass extends EventEmitter {
     return true;
   }
 
-  registerPushToken(userId: string, token: string) {
+  registerPushToken(userId: string, token: string, type?: "expo" | "fcm") {
     this.pushToken = token;
+    this.pushTokenType = type || null;
     if (this.socket?.connected) {
-      this.socket.emit("register_push", { userId, token });
+      this.socket.emit("register_push", { userId, token, type });
       console.log("[GlobalSig] 📲 Push token registered with backend");
     } else {
       // If not connected yet, it will register when connected

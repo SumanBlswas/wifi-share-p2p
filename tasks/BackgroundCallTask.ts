@@ -21,12 +21,19 @@ export async function handleBackgroundNotification(
 ) {
   const data = notification.request.content.data as any;
 
-  if (data && data.type === "incoming_call") {
-    const { fromName, fromId, callId, sdp } = data;
+  if (data && (data.type === "incoming_call" || data.type === "call-offer")) {
+    const callId = (data.callId as string) || `call-${Date.now()}`;
+    const fromId =
+      (data.fromId as string) || (data.handle as string) || "unknown";
+    const fromName =
+      (data.from as string) ||
+      (data.fromName as string) ||
+      "Incoming Call";
 
     console.log("[Background] Receiving call from:", fromName);
 
     // 1. Trigger System Call UI (CallKeep)
-    CallKeepService.displayIncomingCall(callId, fromId, fromName);
+    await CallKeepService.setup({ requestPermissions: false });
+    CallKeepService.displayIncomingCall(callId, fromId, fromName, data);
   }
 }

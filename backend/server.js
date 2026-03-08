@@ -1,6 +1,8 @@
 const express = require("express");
+const fs = require("fs");
 const { createServer } = require("http");
 const { Server } = require("socket.io");
+const { GoogleAuth } = require("google-auth-library");
 
 const app = express();
 const httpServer = createServer(app);
@@ -24,6 +26,45 @@ function inferTokenType(token) {
     return "expo";
   }
   return "fcm";
+}
+
+function loadServiceAccount() {
+  const json = process.env.FCM_SERVICE_ACCOUNT_JSON;
+  if (json) {
+    try {
+      return JSON.parse(json);
+    } catch (e) {
+      console.error("[Push] Failed to parse FCM_SERVICE_ACCOUNT_JSON");
+    }
+  }
+  const path = process.env.FCM_SERVICE_ACCOUNT_PATH;
+  if (path && fs.existsSync(path)) {
+    try {
+      const content = fs.readFileSync(path, "utf8");
+      return JSON.parse(content);
+    } catch (e) {
+      console.error("[Push] Failed to read FCM service account file");
+    }
+  }
+  return null;
+}
+
+const serviceAccount = loadServiceAccount();
+const projectId =
+  process.env.FCM_PROJECT_ID || serviceAccount?.project_id || null;
+const auth = serviceAccount
+  ? new GoogleAuth({
+      credentials: serviceAccount,
+      scopes: ["https://www.googleapis.com/auth/firebase.messaging"],
+    })
+  : null;
+
+async function getFcmAccessToken() {
+  if (!auth) return null;
+  const client = await auth.getClient();
+  const token = await client.getAccessToken();
+  if (typeof token === "string") return token;
+  return token?.token || null;
 }
 
 async function sendExpoPushNotification(expoPushToken, payload) {
@@ -57,36 +98,68 @@ async function sendExpoPushNotification(expoPushToken, payload) {
 }
 
 async function sendFcmPushNotification(fcmToken, payload) {
-  const serverKey = process.env.FCM_SERVER_KEY;
-  if (!serverKey) {
-    console.log("[Push] Missing FCM_SERVER_KEY. Cannot send FCM push.");
+  if (!projectId || !auth) {
+    console.log("[Push] Missing FCM service account or projectId.");
     return;
   }
 
   const fromName = payload.fromName || payload.from || "Unknown";
+  const dataPayload = {
+    type: "call-offer",
+    callId: payload.callId ? String(payload.callId) : undefined,
+    fromId: payload.fromId ? String(payload.fromId) : undefined,
+    fromName: String(fromName),
+    callType: payload.callType ? String(payload.callType) : undefined,
+    sdp: payload.sdp ? String(payload.sdp) : undefined,
+    handle: payload.handle ? String(payload.handle) : undefined,
+  };
+  Object.keys(dataPayload).forEach((key) => {
+    if (dataPayload[key] === undefined) delete dataPayload[key];
+  });
   const message = {
-    to: fcmToken,
-    priority: "high",
-    data: { ...payload, type: "call-offer", fromName },
-    android: {
-      priority: "high",
+    message: {
+      token: fcmToken,
+      notification: {
+        title: `Incoming call from ${fromName}`,
+        body: "Tap to answer",
+      },
+      data: dataPayload,
+      android: {
+        priority: "HIGH",
+        notification: {
+          channel_id: "incoming-call",
+          sound: "default",
+        },
+      },
     },
   };
 
   try {
-    const response = await fetch("https://fcm.googleapis.com/fcm/send", {
-      method: "POST",
-      headers: {
-        Authorization: `key=${serverKey}`,
-        "Content-Type": "application/json",
+    const accessToken = await getFcmAccessToken();
+    if (!accessToken) {
+      console.log("[Push] Failed to acquire FCM access token.");
+      return;
+    }
+    const response = await fetch(
+      `https://fcm.googleapis.com/v1/projects/${projectId}/messages:send`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify(message),
       },
-      body: JSON.stringify(message),
-    });
-    console.log(
-      `[Push] FCM sent to ${payload.targetId}, Status: ${response.status}`,
     );
+    const responseText = await response.text();
+    console.log(
+      `[Push] FCM v1 sent to ${payload.targetId}, Status: ${response.status}`,
+    );
+    if (!response.ok) {
+      console.log(`[Push] FCM v1 error body: ${responseText}`);
+    }
   } catch (err) {
-    console.error(`[Push] FCM Failed:`, err);
+    console.error(`[Push] FCM v1 Failed:`, err);
   }
 }
 
