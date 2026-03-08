@@ -1,0 +1,11 @@
+diff --git a/node_modules/react-native-sms-retriever/android/build.gradle b/node_modules/react-native-sms-retriever/android/build.gradle
+index 3f6050d..6508205 100644
+--- a/node_modules/react-native-sms-retriever/android/build.gradle
++++ b/node_modules/react-native-sms-retriever/android/build.gradle
+@@ -33,5 +33,5 @@ android {
+ 
+ dependencies {
+   implementation "com.facebook.react:react-native:${safeExtGet('reactNativeVersion', '+')}"
+-  implementation 'com.google.android.gms:play-services-auth:17.0.0'
++  implementation 'com.google.android.gms:play-services-auth:20.7.0'
+ }
