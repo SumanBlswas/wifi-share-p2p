@@ -2,6 +2,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { CallKeepService } from '@/services/CallKeepService';
 import { CallService } from '@/services/CallService';
 import { GlobalSigClient } from '@/services/GlobalSigClient';
+import { PushNotificationService } from '@/services/PushNotificationService';
 import { CallSignal, SigServer } from '@/services/SigServer';
 import { UIEvents } from '@/utils/UIEvents';
 import { Ionicons } from '@expo/vector-icons';
@@ -11,6 +12,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import React, { useEffect, useRef, useState } from 'react';
 import {
     ActivityIndicator,
+    AppState,
     StyleSheet, Text, TouchableOpacity, View
 } from 'react-native';
 import RNCallKeep, { AudioRoute } from 'react-native-callkeep';
@@ -22,8 +24,8 @@ type CallState = 'calling' | 'ringing' | 'connected' | 'ended';
 
 export default function CallScreen() {
     // Note: using 'peerId' as the universal identifier (matches conversation screen)
-    const { peerId, peerName, type: direction, offer: incomingOffer, callId: existingCallId, callType: paramCallType } = useLocalSearchParams<{
-        peerId: string; peerName: string; type?: string; incoming?: string; callId?: string; offer?: string; callType?: 'audio' | 'video';
+    const { peerId, peerName, type: direction, offer: incomingOffer, callId: existingCallId, callType: paramCallType, autoAnswer } = useLocalSearchParams<{
+        peerId: string; peerName: string; type?: string; incoming?: string; callId?: string; offer?: string; callType?: 'audio' | 'video'; autoAnswer?: string;
     }>();
 
     const { userId, name } = useAuth();
@@ -75,17 +77,47 @@ export default function CallScreen() {
     useEffect(() => {
         if (callState === 'connected') {
             timerRef.current = setInterval(() => setDuration(d => d + 1), 1000);
-        } else {
-            clearInterval(timerRef.current);
+
+            const reinforcementInterval = setInterval(() => {
+                if (pcRef.current) {
+                    console.log('[CallScreen] 🛡️ Reinforcing audio session in background...');
+                    InCallManager.start({ media: callType === 'video' ? 'video' : 'audio' });
+                }
+            }, 10000);
+
+            return () => {
+                clearInterval(timerRef.current);
+                clearInterval(reinforcementInterval);
+            };
         }
         return () => clearInterval(timerRef.current);
     }, [callState]);
 
     const isInitialised = useRef(false);
 
+    const cleanup = () => {
+        console.log('[WebRTC] 🧹 Cleaning up WebRTC resources...');
+        InCallManager.stop();
+        PushNotificationService.dismissOngoingCallNotification();
+        if (pcRef.current) {
+            pcRef.current.close();
+            pcRef.current = null;
+        }
+        if (localStream) {
+            localStream.getTracks().forEach((track: any) => track.stop());
+            setLocalStream(null);
+        }
+        setRemoteStream(null);
+        CallKeepService.endCall(callId);
+    };
+
     useEffect(() => {
         if (isInitialised.current) return;
         isInitialised.current = true;
+
+        // Force Audio focus and Keep Alive
+        InCallManager.start({ media: callType === 'video' ? 'video' : 'audio' });
+        InCallManager.setKeepScreenOn(true);
 
         setupWebRTC();
 
@@ -221,17 +253,40 @@ export default function CallScreen() {
         // Initialize Audio Routes after a short delay to let CallKeep start the session
         setTimeout(refreshAudioRoutes, 1000);
 
+        // AUTO ANSWER IF WOKEN FROM BACKGROUND
+        if (autoAnswer === 'true' && callState === 'ringing') {
+            console.log('[CallScreen] 🚀 Auto-answering call as requested');
+            setTimeout(handleAnswer, 1500);
+        }
+
+        // AppState listener for background reinforcement
+        const appStateSub = AppState.addEventListener('change', nextAppState => {
+            if (nextAppState === 'background' || nextAppState === 'active') {
+                if (pcRef.current) {
+                    console.log(`[CallScreen] 🔄 App state changed to ${nextAppState}, reinforcing audio session...`);
+                    // We use sessionType from the state if available, or callType as fallback
+                    InCallManager.start({ media: callType === 'video' ? 'video' : 'audio' });
+                }
+            }
+        });
+
         return () => {
             cleanup();
+            appStateSub.remove();
             RNCallKeep.removeEventListener('didChangeAudioRoute');
             UIEvents.off('CALLKEEP_ANSWER', onSystemAnswer);
             UIEvents.off('CALLKEEP_END', onSystemEnd);
             GlobalSigClient.off('signal', handleSignal);
             SigServer.off('signal', handleSignal);
-            CallKeepService.endCall(callId);
             CallService.setActiveCall(null);
         };
     }, []);
+
+    useEffect(() => {
+        if (callState === 'connected') {
+            PushNotificationService.showOngoingCallNotification(peerName || 'Unknown', callType);
+        }
+    }, [callState]);
 
     const setupWebRTC = async () => {
         if (pcRef.current) return;
@@ -286,6 +341,10 @@ export default function CallScreen() {
             if (pc.connectionState === 'connected') {
                 console.log(`[WebRTC] 🎉 Connection established with ${peerId}`);
                 setCallState('connected');
+
+                // Reinforce session in background
+                InCallManager.start({ media: callType === 'video' ? 'video' : 'audio' });
+                RNCallKeep.setCurrentCallActive(callId);
             }
             if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
                 console.log(`[WebRTC] ❌ Connection failed or closed for ${peerId}`);
@@ -297,6 +356,11 @@ export default function CallScreen() {
             console.log('[WebRTC] ICE Connection State:', pc.iceConnectionState);
             if (pc.iceConnectionState === 'connected' || pc.iceConnectionState === 'completed') {
                 setCallState('connected');
+
+                // Backup keep-alive
+                InCallManager.start({ media: callType === 'video' ? 'video' : 'audio' });
+                RNCallKeep.setCurrentCallActive(callId);
+
                 // CLEAR TIMEOUT if it's still running
                 if (callTimeoutRef.current) {
                     clearTimeout(callTimeoutRef.current);
@@ -304,6 +368,7 @@ export default function CallScreen() {
                 }
             }
         };
+
 
         // Capture local stream
         let stream: MediaStream | null = null;
@@ -372,18 +437,6 @@ export default function CallScreen() {
         }
     };
 
-    const cleanup = () => {
-        console.log('[WebRTC] 🧹 Cleaning up WebRTC resources...');
-        if (pcRef.current) {
-            pcRef.current.close();
-            pcRef.current = null;
-        }
-        if (localStream) {
-            localStream.getTracks().forEach((track: any) => track.stop());
-            setLocalStream(null);
-        }
-        setRemoteStream(null);
-    };
 
     const formatDuration = (s: number) => {
         const m = Math.floor(s / 60).toString().padStart(2, '0');

@@ -76,5 +76,20 @@
         <category android:name="android.intent.category.android.intent.category.BROWSABLE"/>
       </intent-filter>
     </activity>
+
+    <!-- RTN CallKeep Service -->
+    <service android:name="io.wazo.callkeep.VoiceConnectionService"
+        android:label="Wazo"
+        android:permission="android.permission.BIND_TELECOM_CONNECTION_SERVICE"
+        android:foregroundServiceType="microphone|camera|phoneCall"
+        android:exported="true">
+        <intent-filter>
+            <action android:name="android.telecom.ConnectionService" />
+        </intent-filter>
+    </service>
+
+    <service android:name="io.wazo.callkeep.RNCallKeepBackgroundMessagingService" android:exported="false" />
+    
+    <receiver android:name="io.wazo.callkeep.RNCallKeepBroadcastReceiver" android:exported="false" />
   </application>
 </manifest>

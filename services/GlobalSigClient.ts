@@ -6,6 +6,7 @@ const GLOBAL_SIGNAL_URL = "https://call-me-now.onrender.com";
 
 class GlobalSigClientClass extends EventEmitter {
   private socket: Socket | null = null;
+  private pushToken: string | null = null;
   private userId: string | null = null;
   private connected = false;
   private knownPeers: Map<string, { name: string; phone: string }> = new Map();
@@ -30,6 +31,12 @@ class GlobalSigClientClass extends EventEmitter {
       console.log(`[GlobalSig] ✅ Connected to Render backend as ${userId}`);
       // Register with the canonical userId
       this.socket?.emit("register", { userId });
+
+      // Auto-register push token if we have one
+      if (this.pushToken) {
+        this.socket?.emit("register_push", { userId, token: this.pushToken });
+      }
+
       this.emit("online", true);
     });
 
@@ -106,14 +113,16 @@ class GlobalSigClientClass extends EventEmitter {
 
   refreshPeers() {
     console.log("[GlobalSig] Refreshing known peers list...");
-    this.knownPeers.forEach((data, id) => {
-      this.emit("peer_identified", {
-        id,
-        name: data.name,
-        phone: data.phone,
-        type: "global",
-      });
-    });
+    this.knownPeers.forEach(
+      (data: { name: string; phone: string }, id: string) => {
+        this.emit("peer_identified", {
+          id,
+          name: data.name,
+          phone: data.phone,
+          type: "global",
+        });
+      },
+    );
   }
 
   sendSignal(targetId: string, signal: CallSignal) {
@@ -133,6 +142,7 @@ class GlobalSigClientClass extends EventEmitter {
   }
 
   registerPushToken(userId: string, token: string) {
+    this.pushToken = token;
     if (this.socket?.connected) {
       this.socket.emit("register_push", { userId, token });
       console.log("[GlobalSig] 📲 Push token registered with backend");

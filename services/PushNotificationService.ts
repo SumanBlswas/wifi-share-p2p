@@ -1,15 +1,61 @@
+import { UIEvents } from "@/utils/UIEvents";
+import {
+  getMessaging,
+  getToken,
+  onMessage,
+  setBackgroundMessageHandler,
+} from "@react-native-firebase/messaging";
 import * as Device from "expo-device";
 import * as Notifications from "expo-notifications";
 import { Platform } from "react-native";
+import { CallKeepService } from "./CallKeepService";
 import { GlobalSigClient } from "./GlobalSigClient";
 
 /**
  * PushNotificationService
  * Handles Expo Push Token registration and background notification listeners.
- * This is the key to waking up the app when it's closed.
  */
 class PushNotificationServiceClass {
   private isInitialized = false;
+
+  constructor() {
+    // B. FIREBASE BACKGROUND MESSAGE HANDLER (CRITICAL FOR CLOSED APP)
+    // Register this AS EARLY AS POSSIBLE (Standalone modular SDK call)
+    try {
+      setBackgroundMessageHandler(getMessaging(), async (remoteMessage) => {
+        console.log(
+          "[Push] 🌙 Received FCM Background Message:",
+          remoteMessage.data,
+        );
+        const data = remoteMessage.data;
+        if (data && data.type === "call-offer") {
+          console.log(
+            "[Push] 📞 Triggering CallKeep for background call from:",
+            data.from,
+          );
+          Notifications.scheduleNotificationAsync({
+            content: {
+              title: `Incoming ${data.callType || "video"} Call`,
+              body: `${data.from || "Someone"} is calling you...`,
+              data: data as any,
+              sound: true,
+              priority: Notifications.AndroidNotificationPriority.MAX,
+              categoryIdentifier: "incoming-call",
+            },
+            trigger: null,
+          });
+          CallKeepService.displayIncomingCall(
+            (data.callId as string) || `call-${Date.now()}`,
+            (data.fromId as string) || "unknown",
+            (data.from as string) || "Incoming Call",
+            data,
+          );
+        }
+      });
+    } catch (e) {
+      console.warn("[Push] Error setting background message handler:", e);
+    }
+  }
 
   async registerForPushNotificationsAsync(userId: string) {
     if (!Device.isDevice) {
@@ -27,7 +73,7 @@ class PushNotificationServiceClass {
     }
 
     if (finalStatus !== "granted") {
-      console.log("[Push] Failed to get push token for push notification!");
+      console.log("[Push] Failed to get push token!");
       return;
     }
 
@@ -36,6 +82,9 @@ class PushNotificationServiceClass {
       console.log("[Push] Expo Push Token:", token);
 
       if (Platform.OS === "android") {
+        const fcmToken = await getToken(getMessaging());
+        console.log("[Push] Native FCM Token:", fcmToken);
+
         Notifications.setNotificationChannelAsync("default", {
           name: "default",
           importance: Notifications.AndroidImportance.MAX,
@@ -44,27 +93,79 @@ class PushNotificationServiceClass {
         });
       }
 
-      // Send token to our Render backend
       GlobalSigClient.registerPushToken(userId, token);
     } catch (e) {
-      console.log(
-        "[Push] Could not get push token. Firebase may not be configured:",
-        e,
-      );
+      console.log("[Push] Error getting tokens:", e);
     }
   }
 
   setupBackgroundHandlers() {
     if (this.isInitialized) return;
 
-    // This listener fires when a user taps on or interacts with a notification
-    Notifications.addNotificationResponseReceivedListener((response) => {
-      const data = response.notification.request.content.data;
-      console.log("[Push] Notification interaction:", data);
-      // Handle incoming call navigation if data contains call info
+    Notifications.setNotificationCategoryAsync("incoming-call", [
+      {
+        identifier: "answer",
+        buttonTitle: "Answer",
+        options: { opensAppToForeground: true },
+      },
+      {
+        identifier: "decline",
+        buttonTitle: "Decline",
+        options: { isDestructive: true },
+      },
+    ]);
+
+    Notifications.setNotificationHandler({
+      handleNotification: async () => ({
+        shouldShowAlert: true,
+        shouldShowBanner: true,
+        shouldShowList: true,
+        shouldPlaySound: true,
+        shouldVibrate: true,
+        shouldSetBadge: false,
+      }),
     });
 
+    Notifications.addNotificationResponseReceivedListener((response) => {
+      const data = response.notification.request.content.data;
+      if (response.actionIdentifier === "answer") {
+        UIEvents.emit("CALLKEEP_ANSWER", data);
+      } else if (response.actionIdentifier === "decline") {
+        UIEvents.emit("CALLKEEP_END", data);
+      }
+    });
+
+    // C. FIREBASE FOREGROUND MESSAGE HANDLER
+    try {
+      onMessage(getMessaging(), async (remoteMessage) => {
+        console.log(
+          "[Push] ☀️ Received FCM Foreground Message:",
+          remoteMessage,
+        );
+      });
+    } catch (e) {
+      console.warn("[Push] Error setting foreground message handler:", e);
+    }
+
     this.isInitialized = true;
+  }
+
+  async showOngoingCallNotification(peerName: string, callType: string) {
+    await Notifications.scheduleNotificationAsync({
+      identifier: "ongoing-call",
+      content: {
+        title: `📞 Active ${callType} Call`,
+        body: `Talking with ${peerName}`,
+        sticky: true,
+        priority: Notifications.AndroidNotificationPriority.LOW,
+      },
+      trigger: null,
+    });
+  }
+
+  async dismissOngoingCallNotification() {
+    await Notifications.dismissNotificationAsync("ongoing-call");
+    await Notifications.dismissNotificationAsync("incoming-call");
   }
 }
 

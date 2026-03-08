@@ -5,6 +5,7 @@
 
 import { EventEmitter } from "@/utils/EventEmitter";
 import { RTCPeerConnection } from "react-native-webrtc";
+import { CallKeepService } from "./CallKeepService";
 import { GlobalSigClient } from "./GlobalSigClient";
 import { sendSignal as sendTcpSignal } from "./SigClient";
 import { CallSignal, SigServer } from "./SigServer";
@@ -77,6 +78,15 @@ class CallServiceClass {
         if (this.onIncomingCall) {
           this.onIncomingCall(signal);
         }
+
+        // TRIGGER SYSTEM LEVEL CALL UI (Floating notification / Lock screen)
+        CallKeepService.displayIncomingCall(
+          signal.callId!,
+          signal.fromId!,
+          signal.from!,
+          signal,
+        );
+
         if (this.routerPush) {
           this.routerPush({
             pathname: "/call",

@@ -56,6 +56,26 @@ function SignalingManager() {
     // 0. Setup CallKeep (System level calling UI)
     CallKeepService.setup();
 
+    // Listener for when a call is answered from the native UI (even in background)
+    const onAnswer = (data: any) => {
+      console.log("[SignalingManager] 📞 Call answered from CallKeep:", data);
+
+      router.push({
+        pathname: "/call",
+        params: {
+          type: "incoming",
+          peerId: data.fromId || data.handle,
+          peerName: data.from || data.localizedCallerName || "Incoming Call",
+          callId: data.callId || data.callUUID,
+          offer: data.sdp, // This comes from the FCM metadata we stored
+          callType: data.callType || "video",
+          autoAnswer: "true",
+        },
+      });
+    };
+
+    UIEvents.on("CALLKEEP_ANSWER", onAnswer);
+
     // 1. Initialize CallService with router and identity
     if (userId) {
       CallService.init((path) => router.push(path), userId, name || undefined);
@@ -64,12 +84,13 @@ function SignalingManager() {
       PushNotificationService.setupBackgroundHandlers();
     }
     return () => {
-      // No global SigServer to stop anymore
+      UIEvents.off("CALLKEEP_ANSWER", onAnswer);
     };
   }, [userId]);
 
   return null;
 }
+
 
 export default function RootLayout() {
   return (
